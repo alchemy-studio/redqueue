@@ -1,6 +1,6 @@
-# Rust Tokio Messaging System with Redis
+# RedQueue
 
-A simple, asynchronous messaging system built with Rust, Tokio, and Redis, supporting publish/subscribe patterns with persistence.
+A blazing-fast, asynchronous messaging system built with Rust, Tokio, and Redis. RedQueue combines the power of Redis with Rust's performance to deliver a robust message queue system.
 
 ## Features
 
@@ -21,7 +21,7 @@ A simple, asynchronous messaging system built with Rust, Tokio, and Redis, suppo
 ## Project Structure
 
 ```
-messaging_system/
+redqueue/
 ├── src/
 │   ├── main.rs         # Example usage and entry point
 │   ├── message.rs      # Message types and structures
@@ -32,22 +32,22 @@ messaging_system/
 
 ## Usage
 
-1. Create a new messaging system instance:
+1. Create a new RedQueue instance:
 ```rust
 let redis_url = "redis://127.0.0.1/";
 let cleanup_interval = Duration::from_secs(60);
-let messaging = MessagingSystem::new(redis_url, cleanup_interval).await?;
+let queue = RedQueue::new(redis_url, cleanup_interval).await?;
 ```
 
 2. Publish messages:
 ```rust
 let message = Message::new("topic_name".to_string(), payload);
-messaging.publish("topic_name", message).await?;
+queue.publish("topic_name", message).await?;
 ```
 
 3. Subscribe to messages:
 ```rust
-let mut subscriber = messaging.subscribe("topic_name").await?;
+let mut subscriber = queue.subscribe("topic_name").await?;
 while let Some(message) = subscriber.next().await {
     // Handle message
 }
@@ -55,7 +55,7 @@ while let Some(message) = subscriber.next().await {
 
 4. Subscribe with filter:
 ```rust
-let mut filtered_subscriber = messaging
+let mut filtered_subscriber = queue
     .subscribe_with_filter("topic_name", |msg| {
         // Filter condition
         true
@@ -65,7 +65,7 @@ let mut filtered_subscriber = messaging
 
 5. Retrieve stored messages:
 ```rust
-let messages = messaging.get_messages("topic_name", 10).await?;
+let messages = queue.get_messages("topic_name", 10).await?;
 ```
 
 ## Redis Data Structure

@@ -19,13 +19,13 @@ use tokio::{
 type MessageStream = Pin<Box<dyn Stream<Item = Message> + Send>>;
 type MessageFilter = Box<dyn Fn(&Message) -> bool + Send + Sync>;
 
-pub struct MessagingSystem {
+pub struct RedQueue {
     topics: Arc<RwLock<HashMap<String, Vec<Sender<Message>>>>>,
     redis: ConnectionManager,
     cleanup_interval: Duration,
 }
 
-impl MessagingSystem {
+impl RedQueue {
     pub async fn new(redis_url: &str, cleanup_interval: Duration) -> Result<Self, MessageError> {
         let client = Client::open(redis_url)?;
         let redis = ConnectionManager::new(client).await?;
