@@ -133,7 +133,71 @@ let mut subscriber = queue
 let messages = queue.get_messages("topic", 10).await?;
 ```
 
-3. **Automatic Cleanup**
+3. **Automatic Message Acknowledgment**
+```rust
+// Subscribe with automatic message removal after processing
+let mut subscriber = queue
+    .auto_ack_subscribe(
+        "my_topic".to_string(),
+        |message| async move {
+            // Process the message
+            println!("Processing message: {:?}", message);
+            
+            // Return Ok if processing succeeded, or Err if it failed
+            // Message will only be removed if processing succeeds
+            Ok(())
+        }
+    )
+    .await?;
+
+// Process messages with automatic removal
+while let Some(result) = subscriber.next().await {
+    match result {
+        Ok(()) => println!("Message processed and removed successfully"),
+        Err(e) => eprintln!("Failed to process message: {}", e),
+    }
+}
+
+// With filtering and automatic acknowledgment
+let mut filtered_subscriber = queue
+    .auto_ack_subscribe_with_filter(
+        "my_topic".to_string(),
+        |msg| msg.payload.len() > 100, // Filter condition
+        |message| async move {
+            // Process the message
+            println!("Processing filtered message: {:?}", message);
+            Ok(())
+        }
+    )
+    .await?;
+
+// Process filtered messages with automatic removal
+while let Some(result) = filtered_subscriber.next().await {
+    match result {
+        Ok(()) => println!("Filtered message processed and removed successfully"),
+        Err(e) => eprintln!("Failed to process filtered message: {}", e),
+    }
+}
+```
+
+4. **Manual Message Removal**
+```rust
+// Subscribe to messages
+let mut subscriber = queue.subscribe("my_topic").await?;
+
+// Process and remove messages manually
+while let Some(message) = subscriber.next().await {
+    // Process the message
+    println!("Processing message: {:?}", message);
+    
+    // Remove the message after successful processing
+    if let Err(e) = queue.remove_message(&message.topic, &message.id.to_string()).await {
+        eprintln!("Failed to remove message: {}", e);
+    }
+}
+```
+
+5. **Automatic Cleanup**
 ```rust
 // Start cleanup task (removes unused topics)
 queue.start_cleanup().await;

@@ -14,9 +14,11 @@ use tokio::{
     },
     time,
 };
-use tokio_stream::StreamExt;
+use tokio_stream::StreamExt as TokioStreamExt;
+use futures::Future;
 
 type MessageStream = Pin<Box<dyn Stream<Item = Message> + Send>>;
+type AutoAckStream = Pin<Box<dyn Stream<Item = Result<(), MessageError>> + Send>>;
 
 #[derive(Clone)]
 pub struct RedQueue {
@@ -83,10 +85,109 @@ impl RedQueue {
         topics.entry(topic.to_string()).or_insert_with(Vec::new).push(tx);
 
         // Convert receiver to stream with filter
-        let stream = tokio_stream::wrappers::ReceiverStream::new(rx)
-            .filter(move |msg| filter(msg));
+        let stream = tokio_stream::wrappers::ReceiverStream::new(rx);
+        let stream = TokioStreamExt::filter(stream, move |msg| filter(msg));
 
         Ok(Box::pin(stream))
+    }
+
+    pub async fn auto_ack_subscribe<F, Fut>(
+        &self,
+        topic: String,
+        process_message: F,
+    ) -> Result<AutoAckStream, MessageError>
+    where
+        F: Fn(Message) -> Fut + Send + Sync + Clone + 'static,
+        Fut: Future<Output = Result<(), MessageError>> + Send + 'static,
+    {
+        let subscriber = self.subscribe(&topic).await?;
+        let queue = self.clone();
+
+        // Create a stream that processes messages and automatically removes them after successful processing
+        let auto_ack_stream = futures::StreamExt::then(subscriber, move |message| {
+            let queue = queue.clone();
+            let topic = topic.clone();
+            let process_message = process_message.clone();
+            
+            async move {
+                // Start a Redis transaction
+                let mut conn = queue.redis.clone();
+                let mut pipe = redis::pipe();
+                pipe.atomic();
+
+                // Process the message first
+                if let Err(e) = process_message(message.clone()).await {
+                    return Err(e);
+                }
+
+                // If processing succeeded, remove the message
+                let message_key = format!("message:{}:{}", topic, message.id);
+                let topic_key = format!("topic:{}:messages", topic);
+
+                // Add commands to transaction pipeline
+                pipe.del(&message_key)
+                    .lrem(&topic_key, 1, message.id.to_string());
+
+                // Execute transaction
+                pipe.query_async::<_, ()>(&mut conn)
+                    .await
+                    .map_err(MessageError::RedisError)?;
+
+                Ok(())
+            }
+        });
+
+        Ok(Box::pin(auto_ack_stream))
+    }
+
+    pub async fn auto_ack_subscribe_with_filter<F, P, Fut>(
+        &self,
+        topic: String,
+        filter: F,
+        process_message: P,
+    ) -> Result<AutoAckStream, MessageError>
+    where
+        F: Fn(&Message) -> bool + Send + Sync + 'static,
+        P: Fn(Message) -> Fut + Send + Sync + Clone + 'static,
+        Fut: Future<Output = Result<(), MessageError>> + Send + 'static,
+    {
+        let subscriber = self.subscribe_with_filter(&topic, filter).await?;
+        let queue = self.clone();
+
+        let auto_ack_stream = futures::StreamExt::then(subscriber, move |message| {
+            let queue = queue.clone();
+            let topic = topic.clone();
+            let process_message = process_message.clone();
+            
+            async move {
+                // Start a Redis transaction
+                let mut conn = queue.redis.clone();
+                let mut pipe = redis::pipe();
+                pipe.atomic();
+
+                // Process the message first
+                if let Err(e) = process_message(message.clone()).await {
+                    return Err(e);
+                }
+
+                // If processing succeeded, remove the message
+                let message_key = format!("message:{}:{}", topic, message.id);
+                let topic_key = format!("topic:{}:messages", topic);
+
+                // Add commands to transaction pipeline
+                pipe.del(&message_key)
+                    .lrem(&topic_key, 1, message.id.to_string());
+
+                // Execute transaction
+                pipe.query_async::<_, ()>(&mut conn)
+                    .await
+                    .map_err(MessageError::RedisError)?;
+
+                Ok(())
+            }
+        });
+
+        Ok(Box::pin(auto_ack_stream))
     }
 
     async fn save_to_redis(&self, topic: &str, message: &Message) -> Result<(), MessageError> {
@@ -124,6 +225,20 @@ impl RedQueue {
         }
         
         Ok(messages)
+    }
+
+    pub async fn remove_message(&self, topic: &str, message_id: &str) -> Result<(), MessageError> {
+        let mut conn = self.redis.clone();
+        
+        // Remove message data
+        let message_key = format!("message:{}:{}", topic, message_id);
+        conn.del::<_, ()>(&message_key).await.map_err(MessageError::RedisError)?;
+        
+        // Remove message ID from topic's message list
+        let topic_key = format!("topic:{}:messages", topic);
+        conn.lrem::<_, _, ()>(&topic_key, 1, message_id).await.map_err(MessageError::RedisError)?;
+        
+        Ok(())
     }
 
     pub async fn start_cleanup(&self) {
