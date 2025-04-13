@@ -42,32 +42,54 @@ redis-cli ping  # Should return "PONG"
 ```rust
 use redqueue::{Message, RedQueue};
 use std::time::Duration;
+use futures::StreamExt;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // Initialize logger
+    env_logger::init();
+
     // Create RedQueue instance
     let redis_url = "redis://127.0.0.1/";
     let cleanup_interval = Duration::from_secs(60);
     let queue = RedQueue::new(redis_url, cleanup_interval).await?;
 
-    // Create a topic
-    let topic = "my_topic";
+    // Start cleanup task
+    queue.start_cleanup().await;
 
-    // Subscribe to messages
+    // Create a topic
+    let topic = "test_topic";
+
+    // Create a subscriber
     let mut subscriber = queue.subscribe(topic).await?;
 
-    // Subscribe with filter (only even-length payloads)
-    let mut filtered = queue
-        .subscribe_with_filter(topic, |msg| msg.payload.len() % 2 == 0)
+    // Create a subscriber with filter
+    let mut filtered_subscriber = queue
+        .subscribe_with_filter(topic, |msg| {
+            // Only accept messages with even payload length
+            msg.payload.len() % 2 == 0
+        })
         .await?;
 
-    // Publish a message
-    let message = Message::new(topic.to_string(), b"Hello, RedQueue!".to_vec());
-    queue.publish(topic, message).await?;
+    // Spawn publisher task
+    let queue_clone = queue.clone();
+    tokio::spawn(async move {
+        for i in 0..5 {
+            let payload = format!("Message {}", i).into_bytes();
+            let message = Message::new(topic.to_string(), payload);
+            if let Err(e) = queue_clone.publish(topic, message).await {
+                eprintln!("Failed to publish message: {}", e);
+            }
+            sleep(Duration::from_secs(1)).await;
+        }
+    });
 
-    // Retrieve stored messages
-    let messages = queue.get_messages(topic, 10).await?;
-    println!("Stored messages: {:?}", messages);
+    // Process messages from subscribers
+    tokio::spawn(async move {
+        while let Some(message) = subscriber.next().await {
+            println!("Regular subscriber received: {:?}", message);
+        }
+    });
 
     Ok(())
 }
@@ -122,34 +144,47 @@ queue.start_cleanup().await;
 ```
 redqueue/
 ├── src/
-│   ├── lib.rs          # Library exports
+│   ├── lib.rs          # Library exports and public API
 │   ├── message.rs      # Message types and serialization
 │   ├── messaging.rs    # Core RedQueue implementation
 │   └── main.rs         # Example usage
+├── tests/
+│   └── messaging_integration.rs  # Integration tests
 ├── Cargo.toml          # Project dependencies
 └── README.md          # This file
 ```
 
 ## Dependencies
 
-- `tokio`: Async runtime and utilities
-- `redis`: Redis client with async support
-- `serde`: Serialization/deserialization
-- `uuid`: Message ID generation
-- `futures`: Stream utilities
-- `log`: Logging support
+- `tokio` (1.36): Async runtime and utilities
+- `redis` (0.24): Redis client with async support
+- `serde` (1.0): Serialization/deserialization
+- `serde_json` (1.0): JSON support
+- `futures` (0.3): Stream utilities
+- `async-trait` (0.1): Async trait support
+- `thiserror` (1.0): Error handling
+- `uuid` (1.7): Message ID generation
+- `log` (0.4): Logging support
+- `env_logger` (0.10): Logger implementation
 
-## Running the Example
+## Running Tests
 
 1. Start Redis server:
 ```bash
 redis-server
 ```
 
-2. Run the example:
+2. Run the tests:
 ```bash
-RUST_LOG=info cargo run
+cargo test
 ```
+
+The test suite includes comprehensive integration tests that verify:
+- Basic message publishing and subscription
+- Message filtering functionality
+- Message persistence and retrieval
+- Topic-based message routing
+- Cleanup functionality
 
 ## Error Handling
 
@@ -171,123 +206,3 @@ Contributions are welcome! Please feel free to submit a Pull Request.
 ## License
 
 MIT 
-
-## Testing
-
-Here's a comprehensive test case that demonstrates message polling functionality:
-
-```rust
-use redqueue::{Message, RedQueue};
-use std::time::Duration;
-use tokio::time::sleep;
-use futures::StreamExt;
-
-#[tokio::test]
-async fn test_message_polling() -> Result<(), Box<dyn std::error::Error>> {
-    // Initialize RedQueue
-    let redis_url = "redis://127.0.0.1/";
-    let cleanup_interval = Duration::from_secs(60);
-    let queue = RedQueue::new(redis_url, cleanup_interval).await?;
-
-    // Create test topic
-    let topic = "test_polling";
-
-    // Subscribe to messages
-    let mut subscriber = queue.subscribe(topic).await?;
-
-    // Start a background task to publish messages
-    let queue_clone = queue.clone();
-    let topic_clone = topic.to_string();
-    tokio::spawn(async move {
-        for i in 0..5 {
-            let payload = format!("Message {}", i).into_bytes();
-            let message = Message::new(topic_clone.clone(), payload);
-            queue_clone.publish(&topic_clone, message).await.unwrap();
-            sleep(Duration::from_millis(100)).await;
-        }
-    });
-
-    // Poll for messages with timeout
-    let mut received_messages = Vec::new();
-    let timeout = Duration::from_secs(2);
-
-    while let Some(message) = tokio::time::timeout(timeout, subscriber.next()).await? {
-        received_messages.push(message);
-        if received_messages.len() >= 5 {
-            break;
-        }
-    }
-
-    // Verify received messages
-    assert_eq!(received_messages.len(), 5);
-    for (i, msg) in received_messages.iter().enumerate() {
-        let expected_payload = format!("Message {}", i);
-        assert_eq!(String::from_utf8_lossy(&msg.payload), expected_payload);
-    }
-
-    // Test message persistence
-    let stored_messages = queue.get_messages(topic, 5).await?;
-    assert_eq!(stored_messages.len(), 5);
-
-    // Test message filtering
-    let mut filtered_subscriber = queue
-        .subscribe_with_filter(topic, |msg| {
-            // Only accept messages with even-numbered payloads
-            let payload = String::from_utf8_lossy(&msg.payload);
-            payload.ends_with("0") || payload.ends_with("2") || payload.ends_with("4")
-        })
-        .await?;
-
-    // Publish more messages
-    for i in 5..10 {
-        let payload = format!("Message {}", i).into_bytes();
-        let message = Message::new(topic.to_string(), payload);
-        queue.publish(topic, message).await?;
-        sleep(Duration::from_millis(100)).await;
-    }
-
-    // Verify filtered messages
-    let mut filtered_messages = Vec::new();
-    while let Some(message) = tokio::time::timeout(timeout, filtered_subscriber.next()).await? {
-        filtered_messages.push(message);
-        if filtered_messages.len() >= 3 {
-            break;
-        }
-    }
-
-    assert_eq!(filtered_messages.len(), 3);
-    for msg in filtered_messages {
-        let payload = String::from_utf8_lossy(&msg.payload);
-        assert!(payload.ends_with("0") || payload.ends_with("2") || payload.ends_with("4"));
-    }
-
-    Ok(())
-}
-```
-
-This test case demonstrates:
-
-1. **Basic Message Polling**
-   - Subscribes to a topic
-   - Publishes messages in a background task
-   - Polls for messages with timeout
-   - Verifies received messages
-
-2. **Message Persistence**
-   - Retrieves stored messages from Redis
-   - Verifies message count and content
-
-3. **Message Filtering**
-   - Creates a filtered subscriber
-   - Publishes additional messages
-   - Verifies that only filtered messages are received
-
-To run the tests:
-
-```bash
-# Run all tests
-cargo test
-
-# Run specific test
-cargo test test_message_polling -- --nocapture
-``` 
