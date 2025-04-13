@@ -1,22 +1,58 @@
-name: Rust
+name: CI
 
 on:
   push:
-    branches: [ "master" ]
+    branches: [ master ]
   pull_request:
-    branches: [ "master" ]
+    branches: [ master ]
 
 env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  build:
-
+  test:
+    name: Test
     runs-on: ubuntu-latest
+    services:
+      redis:
+        image: redis:7
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    strategy:
+      matrix:
+        rust: [stable, 1.75.0]
 
     steps:
     - uses: actions/checkout@v4
-    - name: Build
-      run: cargo build --verbose
-    - name: Run tests
-      run: cargo test --verbose
+
+    - name: Install Rust toolchain
+      uses: dtolnay/rust-toolchain@master
+      with:
+        toolchain: ${{ matrix.rust }}
+
+    - name: Install Redis CLI
+      run: sudo apt-get update && sudo apt-get install -y redis-tools
+
+    - name: Wait for Redis
+      run: |
+        for i in {1..10}; do
+          if redis-cli -h localhost ping; then
+            echo "Redis is ready"
+            exit 0
+          fi
+          echo "Waiting for Redis... attempt $i"
+          sleep 5
+        done
+        echo "Redis failed to start"
+        exit 1
+
+    - name: Run tests with Redis
+      run: cargo test --verbose -- --nocapture
+      env:
+        REDIS_URL: redis://localhost:6379 
