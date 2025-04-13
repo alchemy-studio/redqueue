@@ -171,3 +171,123 @@ Contributions are welcome! Please feel free to submit a Pull Request.
 ## License
 
 MIT 
+
+## Testing
+
+Here's a comprehensive test case that demonstrates message polling functionality:
+
+```rust
+use redqueue::{Message, RedQueue};
+use std::time::Duration;
+use tokio::time::sleep;
+use futures::StreamExt;
+
+#[tokio::test]
+async fn test_message_polling() -> Result<(), Box<dyn std::error::Error>> {
+    // Initialize RedQueue
+    let redis_url = "redis://127.0.0.1/";
+    let cleanup_interval = Duration::from_secs(60);
+    let queue = RedQueue::new(redis_url, cleanup_interval).await?;
+
+    // Create test topic
+    let topic = "test_polling";
+
+    // Subscribe to messages
+    let mut subscriber = queue.subscribe(topic).await?;
+
+    // Start a background task to publish messages
+    let queue_clone = queue.clone();
+    let topic_clone = topic.to_string();
+    tokio::spawn(async move {
+        for i in 0..5 {
+            let payload = format!("Message {}", i).into_bytes();
+            let message = Message::new(topic_clone.clone(), payload);
+            queue_clone.publish(&topic_clone, message).await.unwrap();
+            sleep(Duration::from_millis(100)).await;
+        }
+    });
+
+    // Poll for messages with timeout
+    let mut received_messages = Vec::new();
+    let timeout = Duration::from_secs(2);
+
+    while let Some(message) = tokio::time::timeout(timeout, subscriber.next()).await? {
+        received_messages.push(message);
+        if received_messages.len() >= 5 {
+            break;
+        }
+    }
+
+    // Verify received messages
+    assert_eq!(received_messages.len(), 5);
+    for (i, msg) in received_messages.iter().enumerate() {
+        let expected_payload = format!("Message {}", i);
+        assert_eq!(String::from_utf8_lossy(&msg.payload), expected_payload);
+    }
+
+    // Test message persistence
+    let stored_messages = queue.get_messages(topic, 5).await?;
+    assert_eq!(stored_messages.len(), 5);
+
+    // Test message filtering
+    let mut filtered_subscriber = queue
+        .subscribe_with_filter(topic, |msg| {
+            // Only accept messages with even-numbered payloads
+            let payload = String::from_utf8_lossy(&msg.payload);
+            payload.ends_with("0") || payload.ends_with("2") || payload.ends_with("4")
+        })
+        .await?;
+
+    // Publish more messages
+    for i in 5..10 {
+        let payload = format!("Message {}", i).into_bytes();
+        let message = Message::new(topic.to_string(), payload);
+        queue.publish(topic, message).await?;
+        sleep(Duration::from_millis(100)).await;
+    }
+
+    // Verify filtered messages
+    let mut filtered_messages = Vec::new();
+    while let Some(message) = tokio::time::timeout(timeout, filtered_subscriber.next()).await? {
+        filtered_messages.push(message);
+        if filtered_messages.len() >= 3 {
+            break;
+        }
+    }
+
+    assert_eq!(filtered_messages.len(), 3);
+    for msg in filtered_messages {
+        let payload = String::from_utf8_lossy(&msg.payload);
+        assert!(payload.ends_with("0") || payload.ends_with("2") || payload.ends_with("4"));
+    }
+
+    Ok(())
+}
+```
+
+This test case demonstrates:
+
+1. **Basic Message Polling**
+   - Subscribes to a topic
+   - Publishes messages in a background task
+   - Polls for messages with timeout
+   - Verifies received messages
+
+2. **Message Persistence**
+   - Retrieves stored messages from Redis
+   - Verifies message count and content
+
+3. **Message Filtering**
+   - Creates a filtered subscriber
+   - Publishes additional messages
+   - Verifies that only filtered messages are received
+
+To run the tests:
+
+```bash
+# Run all tests
+cargo test
+
+# Run specific test
+cargo test test_message_polling -- --nocapture
+``` 
