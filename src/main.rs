@@ -43,7 +43,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     });
 
     // Spawn regular subscriber task
-    let queue_clone = queue.clone();
     tokio::spawn(async move {
         while let Some(message) = subscriber.next().await {
             println!("Regular subscriber received: {:?}", message);

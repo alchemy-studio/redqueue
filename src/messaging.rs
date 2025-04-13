@@ -17,7 +17,6 @@ use tokio::{
 use tokio_stream::StreamExt;
 
 type MessageStream = Pin<Box<dyn Stream<Item = Message> + Send>>;
-type MessageFilter = Box<dyn Fn(&Message) -> bool + Send + Sync>;
 
 #[derive(Clone)]
 pub struct RedQueue {
