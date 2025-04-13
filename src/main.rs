@@ -1,6 +1,6 @@
-use redqueue::{message::Message, messaging::RedQueue};
 use std::time::Duration;
 use tokio::time::sleep;
+use futures::StreamExt;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -10,7 +10,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Create RedQueue instance
     let redis_url = "redis://127.0.0.1/";
     let cleanup_interval = Duration::from_secs(60);
-    let queue = RedQueue::new(redis_url, cleanup_interval).await?;
+    let queue = redqueue::RedQueue::new(redis_url, cleanup_interval).await?;
 
     // Start cleanup task
     queue.start_cleanup().await;
@@ -34,8 +34,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     tokio::spawn(async move {
         for i in 0..5 {
             let payload = format!("Message {}", i).into_bytes();
-            let message = Message::new(topic.to_string(), payload);
-            queue_clone.publish(topic, message).await.unwrap();
+            let message = redqueue::Message::new(topic.to_string(), payload);
+            if let Err(e) = queue_clone.publish(topic, message).await {
+                eprintln!("Failed to publish message: {}", e);
+            }
             sleep(Duration::from_secs(1)).await;
         }
     });
@@ -57,8 +59,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Wait a bit and then retrieve stored messages
     sleep(Duration::from_secs(2)).await;
-    let stored_messages = queue.get_messages(topic, 5).await?;
-    println!("Stored messages: {:?}", stored_messages);
+    match queue.get_messages(topic, 5).await {
+        Ok(messages) => println!("Stored messages: {:?}", messages),
+        Err(e) => eprintln!("Failed to get messages: {}", e),
+    }
 
     // Keep the main thread alive
     sleep(Duration::from_secs(10)).await;

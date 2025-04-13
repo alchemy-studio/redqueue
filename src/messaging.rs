@@ -1,5 +1,4 @@
-use crate::message::{AckMessage, Message, MessageError};
-use async_trait::async_trait;
+use crate::message::{Message, MessageError};
 use futures::Stream;
 use redis::{aio::ConnectionManager, AsyncCommands, Client};
 use std::{
@@ -15,10 +14,12 @@ use tokio::{
     },
     time,
 };
+use tokio_stream::StreamExt;
 
 type MessageStream = Pin<Box<dyn Stream<Item = Message> + Send>>;
 type MessageFilter = Box<dyn Fn(&Message) -> bool + Send + Sync>;
 
+#[derive(Clone)]
 pub struct RedQueue {
     topics: Arc<RwLock<HashMap<String, Vec<Sender<Message>>>>>,
     redis: ConnectionManager,
@@ -27,8 +28,8 @@ pub struct RedQueue {
 
 impl RedQueue {
     pub async fn new(redis_url: &str, cleanup_interval: Duration) -> Result<Self, MessageError> {
-        let client = Client::open(redis_url)?;
-        let redis = ConnectionManager::new(client).await?;
+        let client = Client::open(redis_url).map_err(MessageError::RedisError)?;
+        let redis = ConnectionManager::new(client).await.map_err(MessageError::RedisError)?;
 
         Ok(Self {
             topics: Arc::new(RwLock::new(HashMap::new())),
@@ -84,10 +85,7 @@ impl RedQueue {
 
         // Convert receiver to stream with filter
         let stream = tokio_stream::wrappers::ReceiverStream::new(rx)
-            .filter(move |msg| {
-                let filter = filter.clone();
-                async move { filter(msg) }
-            });
+            .filter(move |msg| filter(msg));
 
         Ok(Box::pin(stream))
     }
@@ -100,11 +98,11 @@ impl RedQueue {
         let message_json = serde_json::to_string(message)?;
         
         // Store message data
-        conn.set(&message_key, &message_json).await?;
+        conn.set::<_, _, ()>(&message_key, &message_json).await.map_err(MessageError::RedisError)?;
         
         // Add message ID to topic's message list
         let topic_key = format!("topic:{}:messages", topic);
-        conn.lpush(&topic_key, message.id.to_string()).await?;
+        conn.lpush::<_, _, ()>(&topic_key, message.id.to_string()).await.map_err(MessageError::RedisError)?;
 
         Ok(())
     }
@@ -114,12 +112,12 @@ impl RedQueue {
         let topic_key = format!("topic:{}:messages", topic);
         
         // Get message IDs from Redis
-        let message_ids: Vec<String> = conn.lrange(&topic_key, 0, count - 1).await?;
+        let message_ids: Vec<String> = conn.lrange(&topic_key, 0, count - 1).await.map_err(MessageError::RedisError)?;
         
         let mut messages = Vec::new();
         for id in message_ids {
             let message_key = format!("message:{}:{}", topic, id);
-            if let Ok(message_json) = conn.get::<_, String>(&message_key).await {
+            if let Ok(message_json) = conn.get::<_, String>(&message_key).await.map_err(MessageError::RedisError) {
                 if let Ok(message) = serde_json::from_str::<Message>(&message_json) {
                     messages.push(message);
                 }
@@ -144,7 +142,7 @@ impl RedQueue {
                         // Clean up topic in Redis
                         let mut conn = redis.clone();
                         let topic_key = format!("topic:{}:messages", topic);
-                        if let Err(e) = conn.del(&topic_key).await {
+                        if let Err(e) = conn.del::<_, ()>(&topic_key).await {
                             log::error!("Failed to clean up topic {}: {}", topic, e);
                         }
                     }
