@@ -144,7 +144,8 @@ let mut subscriber = queue
             println!("Processing message: {:?}", message);
             
             // Return Ok if processing succeeded, or Err if it failed
-            // Message will only be removed if processing succeeds
+            // Message will only be removed from Redis if processing succeeds
+            // The removal is done atomically using Redis MULTI/EXEC
             Ok(())
         }
     )
@@ -154,7 +155,10 @@ let mut subscriber = queue
 while let Some(result) = subscriber.next().await {
     match result {
         Ok(()) => println!("Message processed and removed successfully"),
-        Err(e) => eprintln!("Failed to process message: {}", e),
+        Err(e) => {
+            eprintln!("Failed to process message: {}", e);
+            // Message remains in Redis for retry or manual handling
+        }
     }
 }
 
@@ -166,6 +170,7 @@ let mut filtered_subscriber = queue
         |message| async move {
             // Process the message
             println!("Processing filtered message: {:?}", message);
+            // Message will be automatically removed from Redis on success
             Ok(())
         }
     )
@@ -175,10 +180,26 @@ let mut filtered_subscriber = queue
 while let Some(result) = filtered_subscriber.next().await {
     match result {
         Ok(()) => println!("Filtered message processed and removed successfully"),
-        Err(e) => eprintln!("Failed to process filtered message: {}", e),
+        Err(e) => {
+            eprintln!("Failed to process filtered message: {}", e);
+            // Failed messages remain in Redis
+        }
     }
 }
 ```
+
+The `auto_ack_subscribe` feature provides:
+- Automatic message removal after successful processing
+- Atomic Redis transactions using MULTI/EXEC
+- Message retention on processing failure
+- Optional message filtering
+- Async message processing with proper error handling
+
+Test coverage includes:
+- Successful message processing and removal
+- Error handling and message retention
+- Multiple message processing
+- Message filtering with automatic acknowledgment
 
 4. **Manual Message Removal**
 ```rust
@@ -213,7 +234,8 @@ redqueue/
 │   ├── messaging.rs    # Core RedQueue implementation
 │   └── main.rs         # Example usage
 ├── tests/
-│   └── messaging_integration.rs  # Integration tests
+│   ├── messaging_integration.rs  # Integration tests
+│   └── messaging_tests.rs        # Auto-ack subscribe tests
 ├── Cargo.toml          # Project dependencies
 └── README.md          # This file
 ```
@@ -248,7 +270,15 @@ The test suite includes comprehensive integration tests that verify:
 - Message filtering functionality
 - Message persistence and retrieval
 - Topic-based message routing
-- Cleanup functionality
+- Automatic message acknowledgment and cleanup
+- Error handling and message retention
+- Multiple message processing scenarios
+
+The tests are organized into:
+- `messaging_integration.rs`: End-to-end integration tests
+- `messaging_tests.rs`: Focused tests for auto-ack subscribe functionality
+
+Each test file includes proper Redis cleanup to ensure test isolation.
 
 ## Error Handling
 
